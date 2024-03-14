@@ -1,0 +1,143 @@
+#! /bin/bash  
+
+############################################# input information ####################################################
+current_path=$PWD
+input_information_gjf=${PWD}'/Edit_info_file/DNN_TL_input_for_gjf.txt'
+f1=${PWD#*/}
+f2=${f1#*/}
+user_name=${f2%%/*}
+echo $user_name
+cluster=$(awk 'NR==2{print $3}' ${input_information_gjf})
+Min_Multi_gjf=$(awk 'NR==3{print $3}' ${input_information_gjf})
+Max_Multi_gjf=$(awk 'NR==4{print $3}' ${input_information_gjf})
+server_num_gjf=$(awk 'NR==8{print $3}' ${input_information_gjf})
+echo $server_num_gjf
+DFT_steps=$(awk 'NR==6{print $3}' ${input_information_gjf})
+server_num_gjf_str=$(awk -v RS=',' '!a[$1]++' <<< ${server_num_gjf[@]})
+server_num_gjf_arr=(`echo $server_num_gjf_str | tr ',' ' '`)
+
+input_information_opt=${PWD}'/Edit_info_file/DNN_TL_input_for_opt_structs.txt' 
+Min_Multi_opt=$(awk 'NR==4{print $3}' ${input_information_opt})
+Max_Multi_opt=$(awk 'NR==5{print $3}' ${input_information_opt})
+server_num_opt=$(awk 'NR==8{print $3}' ${input_information_opt})
+xc_function=$(awk 'NR==21{print $3}' ${input_information_opt})
+basis_set=$(awk 'NR==22{print $3}' ${input_information_opt})
+server_num_opt_str=$(awk -v RS=',' '!a[$1]++' <<< ${server_num_opt[@]})
+server_num_opt_arr=(`echo $server_num_opt_str | tr ',' ' '`)
+#####################################################################################################################
+
+######################################### creat initial structs #####################################################
+#source activate python2
+#nohup python -u PGOPT_run_get_gjf.py  > /home/${user_name}/Work_${cluster}/${cluster}-initial-structs.out 
+python DNN_TL_run_get_gjf.py
+####################################################################################################################
+
+
+#################################################################################################################################################################### limited steps DFT #################################################################################################################################################################################
+for j in ${server_num_gjf_arr[*]}
+do
+if [ -e ${cluster} ];then
+   echo ${cluster} is exist!
+else
+   echo !!!server${j}:mkdir file ${cluster}!!!
+   ssh server${j} mkdir ${cluster}
+fi
+done
+
+Multi_index_gjf=$((1+$((${Max_Multi_gjf}-${Min_Multi_gjf}))/2))
+for((i=1;i<=$Multi_index_gjf;i++));
+do
+   Multi=$((${Min_Multi_gjf}+2*($i-1)))
+############################################ mkdir file and move ##################################################    
+   for j in ${server_num_gjf_arr[*]} 
+   do
+   ssh server${j} mv ${cluster}-struct-to-${DFT_steps}-steps-DFT_M* /home/${user_name}/${cluster}
+   done
+##################################################################################################################
+   
+####################################### run Gaussian for initial structs ##########################################
+   k=1
+   server_num_gjf_arr_index=1
+   for j in ${server_num_gjf_arr[*]}
+   do
+   echo !!!M${Multi}!!!
+   echo !!!${cluster}-server${j}:run Gaussian for initial structs!!!
+   if [ $server_num_gjf_arr_index -lt ${#server_num_gjf_arr[@]} ];then 
+      ssh server${j} "export BASH_ENV=/etc/profile ; cd /home/${user_name}/${cluster}/${cluster}-struct-to-${DFT_steps}-steps-DFT_M${Multi}_server${j} ; chmod 770 run-${k}_1 ; ./run-${k}_1 " &
+      ssh server${j} "export BASH_ENV=/etc/profile ; cd /home/${user_name}/${cluster}/${cluster}-struct-to-${DFT_steps}-steps-DFT_M${Multi}_server${j} ; chmod 770 run-${k}_2 ; ./run-${k}_2 " &
+   else
+      ssh server${j} "export BASH_ENV=/etc/profile ; cd /home/${user_name}/${cluster}/${cluster}-struct-to-${DFT_steps}-steps-DFT_M${Multi}_server${j} ; chmod 770 run-${k}_1 ; ./run-${k}_1 " &
+      ssh server${j} "export BASH_ENV=/etc/profile ; cd /home/${user_name}/${cluster}/${cluster}-struct-to-${DFT_steps}-steps-DFT_M${Multi}_server${j} ; chmod 770 run-${k}_2 ; ./run-${k}_2 " 
+   fi         
+   server_num_gjf_arr_index=$(($server_num_gjf_arr_index+1))
+   k=$(($k+1))
+   done
+###################################################################################################################
+
+########################################### collect .log files ####################################################
+   for j in ${server_num_gjf_arr[*]}
+   do
+   ssh server${j} "cd /home/${user_name}/${cluster}/${cluster}-struct-to-${DFT_steps}-steps-DFT_M${Multi}_server${j};   
+                   mkdir ${cluster}-struct-to-${DFT_steps}-steps-DFT_M${Multi}_server${j}_log ;  
+                   cp -f *.log ${cluster}-struct-to-${DFT_steps}-steps-DFT_M${Multi}_server${j}_log ; 
+                   cd /home/${user_name}/${cluster}/${cluster}-struct-to-${DFT_steps}-steps-DFT_M${Multi}_server${j} ;
+                   scp -r ${cluster}-struct-to-${DFT_steps}-steps-DFT_M${Multi}_server${j}_log servergpu2:${current_path}/DNN_TL_${cluster}/Gaussian/${cluster}/${DFT_steps}-steps-DFT-outputs/M${Multi}"
+   cd ${current_path}/DNN_TL_${cluster}/Gaussian/${cluster}/${DFT_steps}-steps-DFT-outputs/M${Multi}/${cluster}-struct-to-${DFT_steps}-steps-DFT_M${Multi}_server${j}_log
+   cp -f *.log ${current_path}/DNN_TL_${cluster}/Gaussian/${cluster}/${DFT_steps}-steps-DFT-outputs/M${Multi}
+   done
+####################################################################################################################
+done 
+########################################################################################################################################################################################################################################################################################################################################################################
+
+
+######################################## extract structs and energies ##############################################
+#conda activate base
+nohup python -u DNN_TL_get_structs_and_energies_from_Gaussian_log.py > ${current_path}/DNN_TL_${cluster}/${cluster}-get-log.out
+
+#python  Get_structs_and_energies_from_Gaussian_log.py 
+####################################################################################################################
+
+
+########################################## Train DNN and opt structs ###############################################
+cd ${current_path}
+#source activate python2
+nohup python -u DNN_TL_run_get_DNN_opt_structs.py > ${current_path}/DNN_TL_${cluster}/${cluster}-nn-opt.out                                    
+#python PGOPT_run_get_DNN_opt_stucts.py   
+####################################################################################################################
+
+
+########################################################################################################################
+############################################# Full steps DFT ###################################################################################################################################################################################
+for j in ${server_num_opt_arr[*]}
+do
+if [ -e ${cluster} ];then
+   echo ${cluster} is exist!
+else
+   echo !!!server${j}:mkdir file ${cluster}!!!
+   ssh server${j} mkdir ${cluster}
+fi
+done
+
+Multi_index_opt=$((1+$((${Max_Multi_opt}-${Min_Multi_opt}))/2))
+
+for((i=1;i<=$Multi_index_opt;i++));
+do
+   Multi_opt=$((${Min_Multi_opt}+2*($i-1)))
+   echo !!!M$Multi_opt!!!
+############################################ mkdir file and move ##################################################    
+   ssh server${server_num_opt_arr[$i-1]} mv Final_DFT_${cluster}_M${Multi_opt}_${xc_function}_${basis_set}_server${server_num_opt_arr[$i-1]} /home/${user_name}/${cluster}
+###################################################################################################################
+
+########################################### run Gaussian for opt structs ##########################################
+   echo !!!${cluster}-M${Multi_opt}-server${j}:run Gaussian for opt structs!!!
+   if [ $Multi_opt -lt ${Max_Multi_opt} ];then
+      ssh server${server_num_opt_arr[$i-1]} "export BASH_ENV=/etc/profile ; cd /home/${user_name}/${cluster}/Final_DFT_${cluster}_M${Multi_opt}_${xc_function}_${basis_set}_server${server_num_opt_arr[$i-1]} ; chmod 770 run ; ./run " &
+   else
+      ssh server${server_num_opt_arr[$i-1]} "export BASH_ENV=/etc/profile ; cd /home/${user_name}/${cluster}/Final_DFT_${cluster}_M${Multi_opt}_${xc_function}_${basis_set}_server${server_num_opt_arr[$i-1]} ; chmod 770 run ; ./run "
+   fi
+###################################################################################################################
+done
+
+cd ${current_path}
+nohup python -u AUTO_Processing_final_DFT_opted_structs.py > ${current_path}/DNN_TL_${cluster}/${cluster}-final-DFT-opt-structs.out
+
